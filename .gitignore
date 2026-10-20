@@ -34,6 +34,17 @@ config.local.json
 !assets/*.ico
 !assets/**/*.png
 
+# 本地文档：Git 只跟踪 README.md，其余设计文档仅保留在本地
+THIRD_PARTY_NOTICES.md
+docs/
+任务书及评分标准-*.md
+选题调研报告-*.md
+项目开发规划-*.md
+项目计划书-*.md
+
+# 历史备份
+docscan-history-backup.bundle
+
 # 编辑器
 .vscode/
 .idea/
