@@ -95,6 +95,15 @@ class AppController:
         stage = self.runner.get_stage(name)
         self.view.log(f"阶段「{stage.label}」{'启用' if enabled else '停用'}")
 
+    def apply_manual_peaks(self, points: list[tuple[int, int]]) -> None:
+        """频谱视图选点 → 写入去网纹阶段参数并启用。"""
+        stage = self.runner.get_stage("freq")
+        stage.params["manual_peaks"] = list(points)
+        if points and not stage.enabled:
+            self.runner.set_enabled("freq", True)
+            self.view.stage_list_rebuild_if_needed()
+        self.view.log(f"频谱选点 {len(points)} 个：{points[:6]}")
+
     def select_stage(self, name: str) -> None:
         """切换查看某阶段的输出。"""
         if self.last_result is None:
