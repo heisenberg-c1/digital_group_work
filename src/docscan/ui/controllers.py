@@ -11,7 +11,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from docscan.core.types import StageResult
+from docscan.core.types import Image, StageResult
 from docscan.io.loader import load_any
 from docscan.pipeline.runner import Runner, RunResult
 from docscan.pipeline.stages import Stage, build_default_stages
