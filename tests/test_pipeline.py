@@ -76,11 +76,11 @@ class TestRunner:
         np.testing.assert_array_equal(to_uint8(r1.final), to_uint8(r2.final))
 
     def test_default_chain_end_to_end(self, tilted_page):
-        """默认链（几何校正 + 二值化）在斜拍文档上产出二值图。"""
+        """默认链（几何校正 + 光照归一 + 二值化）在斜拍文档上产出二值图。"""
         img, _ = tilted_page
         runner = Runner(build_default_stages())
         result = runner.run(img)
-        assert result.order == ["warp", "binarize"]
+        assert result.order == ["warp", "illumination", "binarize"]
         final = to_uint8(result.final)
         assert final.ndim == 2
         assert set(np.unique(final)).issubset({0, 255})
@@ -106,26 +106,28 @@ class TestStageParams:
         assert received["block_size"] == 15
 
     def test_reset_params_restores_defaults(self):
-        stage = build_default_stages()[1]  # binarize
-        stage.params["block_size"] = 99
-        stage.reset_params()
-        assert stage.params["block_size"] == 31
+        stages = {s.name: s for s in build_default_stages()}
+        stages["binarize"].params["block_size"] = 99
+        stages["binarize"].reset_params()
+        assert stages["binarize"].params["block_size"] == 31
 
 
 class TestPipelineConfig:
     def test_roundtrip_json(self, tmp_path):
         stages = build_default_stages()
-        stages[0].enabled = False
-        stages[1].params["block_size"] = 41
+        by_name = {s.name: s for s in stages}
+        by_name["warp"].enabled = False
+        by_name["binarize"].params["block_size"] = 41
         cfg = PipelineConfig.from_stages(stages)
         p = cfg.save(tmp_path / "preset.json")
 
         loaded = PipelineConfig.load(p)
         fresh = build_default_stages()
         loaded.apply_to(fresh)
-        assert fresh[0].enabled is False
-        assert fresh[1].params["block_size"] == 41
-        assert fresh[1].enabled is True
+        fresh_by_name = {s.name: s for s in fresh}
+        assert fresh_by_name["warp"].enabled is False
+        assert fresh_by_name["binarize"].params["block_size"] == 41
+        assert fresh_by_name["binarize"].enabled is True
 
     def test_apply_ignores_unknown_keys(self):
         cfg = PipelineConfig(enabled={"nope": True}, params={"warp": {"nope": 1}})
