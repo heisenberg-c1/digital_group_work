@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# 构建产物
+*.spec.bak
+
+# 数据：原图与合成数据体积大，一律不进仓库
+data/raw/*
+data/synth/*
+data/results/*
+!data/**/.gitkeep
+
+# 本地配置
+config.local.json
+
+# 大文件保险：图片默认忽略，只白名单放行小图与图标
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+!samples/demo/*.jpg
+!samples/demo/*.png
+!tests/fixtures/*.png
+!tests/fixtures/**/*.png
+!assets/*.png
+!assets/*.ico
+!assets/**/*.png
+
+# 编辑器
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
