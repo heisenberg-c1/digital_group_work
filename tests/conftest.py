@@ -79,6 +79,37 @@ def paste_on_background(
     return canvas
 
 
+def add_stripes(
+    img: np.ndarray,
+    *,
+    wavelength: int = 32,
+    angle_deg: float = 0.0,
+    amplitude: float = 0.3,
+) -> np.ndarray:
+    """叠加已知频率/方向的摩尔纹（正弦条纹），模拟拍屏幕产生的网纹。
+
+    Args:
+        img: float32[0,1] 或 uint8 图（内部转 float）。
+        wavelength: 条纹波长（像素）。图像宽为波长整数倍时，频率正好落在 FFT 整数 bin 上。
+        angle_deg: 条纹法线方向。
+        amplitude: 条纹幅值。
+
+    Returns:
+        float32[0,1]。
+    """
+    arr = img.astype(np.float32)
+    if arr.max() > 1.5:
+        arr = arr / 255.0
+    h, w = arr.shape[:2]
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+    theta = np.deg2rad(angle_deg)
+    phase = 2.0 * np.pi * (xx * np.cos(theta) + yy * np.sin(theta)) / wavelength
+    stripe = amplitude * np.sin(phase)
+    if arr.ndim == 3:
+        stripe = stripe[..., None]
+    return np.clip(arr + stripe, 0.0, 1.0).astype(np.float32)
+
+
 def quad_mask(quad: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     """把四边形画成实心掩膜（uint8 {0,255}）。"""
     mask = np.zeros(shape[:2], dtype=np.uint8)
