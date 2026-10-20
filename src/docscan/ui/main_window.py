@@ -56,6 +56,9 @@ class MainWindow(ttk.Frame):
         ttk.Button(bar, text="保存结果", command=self._save_result).pack(
             side=tk.LEFT, padx=(SP_2, 0)
         )
+        ttk.Button(bar, text="频谱选点", command=self._open_spectrum).pack(
+            side=tk.LEFT, padx=(SP_2, 0)
+        )
 
         ttk.Separator(bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=SP_3)
         self.zoom_var = tk.StringVar(value="fit")
@@ -111,6 +114,27 @@ class MainWindow(ttk.Frame):
         self.root.bind("<Control-s>", lambda _e: self._save_result())
 
     # ---- 用户动作 ----
+
+    def _open_spectrum(self) -> None:
+        """弹出频谱视图，选点结果写入去网纹阶段。"""
+        if self._source is None:
+            self.show_error("提示", "请先打开一张图像")
+            return
+        from docscan.ui.widgets.spectrum_view import SpectrumView
+
+        win = tk.Toplevel(self)
+        win.title("幅度谱 · 陷波选点")
+        win.geometry("760x640")
+        view = SpectrumView(win, self.theme, on_points_changed=self.controller.apply_manual_peaks)
+        view.pack(fill=tk.BOTH, expand=True, padx=SP_3, pady=SP_3)
+        view.show(self._source)
+
+    def stage_list_rebuild_if_needed(self) -> None:
+        """阶段启用状态在代码侧变化后，同步勾选框显示。"""
+        selected = self.stage_list.selected
+        self.stage_list.rebuild(self.controller.stages)
+        if selected:
+            self.stage_list.select(selected)
 
     def _open_dialog(self) -> None:
         path = filedialog.askopenfilename(title="打开图像", filetypes=FILE_PATTERNS)
