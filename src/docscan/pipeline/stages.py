@@ -1,0 +1,97 @@
+"""Stage 抽象与默认处理链。
+
+每个 Stage 是一个可独立开关的处理步骤：
+* ``func(image, params) -> (image, notes, metrics)``，纯函数式，便于测试；
+* ``params_spec`` 描述可调参数（名称、范围、默认值），UI 据此自动生成控件；
+* 关闭的阶段由 Runner 直接跳过（函数不被调用）。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
+import cv2
+
+from docscan.core import binarize, geometry
+from docscan.core.types import Image, to_uint8
+
+# 参数规格：(键, 中文标签, 默认值, 最小值, 最大值)
+ParamSpec = tuple[str, str, float, float, float]
+
+
+@dataclass
+class Stage:
+    """处理链中的一个步骤。"""
+
+    name: str
+    label: str
+    func: Callable[[Image, dict], tuple[Image, str, dict[str, float]]]
+    params_spec: list[ParamSpec] = field(default_factory=list)
+    params: dict = field(default_factory=dict)
+    enabled: bool = True
+
+    def reset_params(self) -> None:
+        """把参数恢复为默认值。"""
+        self.params = {key: default for key, _, default, _, _ in self.params_spec}
+
+
+def stage_warp(
+    img: Image, params: dict
+) -> tuple[Image, str, dict[str, float]]:
+    """几何校正阶段。"""
+    min_conf = float(params.get("min_confidence", 0.6))
+    quad = geometry.detect_quad(img, min_confidence=min_conf)
+    if quad.is_fallback:
+        note = f"角点检测失败（置信度 {quad.confidence:.2f}），保留整图"
+        return img, note, {"confidence": quad.confidence, "warped": 0.0}
+    out = geometry.warp_perspective(img, quad)
+    note = f"角点置信度 {quad.confidence:.2f}"
+    return out, note, {"confidence": quad.confidence, "warped": 1.0}
+
+
+def stage_binarize(
+    img: Image, params: dict
+) -> tuple[Image, str, dict[str, float]]:
+    """自适应阈值二值化阶段（输入彩色图时先转灰度）。"""
+    block = int(params.get("block_size", 31))
+    c = float(params.get("c", 10.0))
+    gray = binarize.to_gray(img)
+    out = binarize.adaptive(gray, block_size=block, c=c)
+    out = binarize.clean_small_components(out, min_area=int(params.get("min_area", 8)))
+    ink = float((out < 128).mean())
+    return out, f"blockSize={block}, C={c:g}", {"ink_ratio": ink}
+
+
+WARP_SPEC: list[ParamSpec] = [
+    ("min_confidence", "角点置信度阈值", 0.6, 0.0, 1.0),
+]
+BINARIZE_SPEC: list[ParamSpec] = [
+    ("block_size", "邻域边长(奇数)", 31, 3, 151),
+    ("c", "阈值偏置 C", 10.0, 0.0, 40.0),
+    ("min_area", "最小连通域", 8, 0, 200),
+]
+
+
+def build_default_stages() -> list[Stage]:
+    """M1 默认处理链：几何校正 → 二值化。后续迭代在此追加阶段。"""
+    stages = [
+        Stage("warp", "几何校正", stage_warp, WARP_SPEC),
+        Stage("binarize", "二值化", stage_binarize, BINARIZE_SPEC),
+    ]
+    for s in stages:
+        s.reset_params()
+    return stages
+
+
+def make_preview(image: Image, max_side: int = 900) -> Image:
+    """生成 UI 预览用缩略图（uint8 BGR）。"""
+    arr = to_uint8(image)
+    h, w = arr.shape[:2]
+    longest = max(h, w)
+    if longest <= max_side:
+        return arr
+    scale = max_side / longest
+    return cv2.resize(
+        arr, (max(1, round(w * scale)), max(1, round(h * scale))), interpolation=cv2.INTER_AREA
+    )
