@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-from docscan.core import binarize, color, enhance, freq, geometry, illumination
+from docscan.core import binarize, color, enhance, freq, geometry, illumination, restore, sharpen
 from docscan.core.types import Image, to_uint8
 
 # 参数规格：(键, 中文标签, 默认值, 最小值, 最大值)
@@ -131,6 +131,33 @@ def stage_freq_denoise(
     return out, note, {"peaks": float(len(peaks)), "peak_drop_db": drop}
 
 
+def stage_restore(
+    img: Image, params: dict
+) -> tuple[Image, str, dict[str, float]]:
+    """退化复原阶段：倒谱估 PSF（或手动指定）→ 维纳滤波。"""
+    if bool(int(params.get("use_estimation", 1))):
+        angle, length = restore.estimate_psf_cepstrum(img)
+        note = f"倒谱估计 PSF: L={length}, θ={angle:.1f}°"
+    else:
+        length = int(params.get("length", 9))
+        angle = float(params.get("angle_deg", 0.0))
+        note = f"手动 PSF: L={length}, θ={angle:.1f}°"
+    psf = restore.motion_psf(max(31, length * 2 | 1), length, angle)
+    k = float(params.get("K", 0.01))
+    out = restore.wiener(img, psf, K=k)
+    return out, note + f", K={k:g}", {"psf_length": float(length), "psf_angle": angle}
+
+
+def stage_sharpen(
+    img: Image, params: dict
+) -> tuple[Image, str, dict[str, float]]:
+    """USM 锐化阶段（在二值化之前补偿轻度离焦）。"""
+    amount = float(params.get("amount", 1.0))
+    radius = float(params.get("radius", 2.0))
+    out = sharpen.unsharp_mask(img, radius=radius, amount=amount)
+    return out, f"USM amount={amount:g}, σ={radius:g}", {}
+
+
 WARP_SPEC: list[ParamSpec] = [
     ("min_confidence", "角点置信度阈值", 0.6, 0.0, 1.0),
 ]
@@ -154,12 +181,22 @@ FREQ_SPEC: list[ParamSpec] = [
     ("radius", "陷波半径(0=自适应)", 0.0, 0.0, 40.0),
     ("order", "Butterworth 阶数", 4.0, 1.0, 16.0),
 ]
+RESTORE_SPEC: list[ParamSpec] = [
+    ("use_estimation", "自动估计PSF(1/0)", 1.0, 0.0, 1.0),
+    ("length", "模糊长度(手动)", 9.0, 1.0, 51.0),
+    ("angle_deg", "模糊角度(手动)", 0.0, -90.0, 90.0),
+    ("K", "维纳噪信比", 0.01, 1e-5, 1.0),
+]
+SHARPEN_SPEC: list[ParamSpec] = [
+    ("amount", "锐化强度", 1.0, 0.0, 3.0),
+    ("radius", "模糊半径σ", 2.0, 0.5, 8.0),
+]
 
 
 def build_default_stages() -> list[Stage]:
-    """默认处理链：几何校正 → 光照归一 → 白平衡 → 增强 → 去网纹 → 二值化。
+    """默认处理链：校正 → 光照 → 白平衡 → 增强 → 去网纹 → 复原 → 锐化 → 二值化。
 
-    白平衡、增强、去网纹默认关闭（按需在 UI 勾选），后续迭代追加复原阶段。
+    除校正与光照归一外均默认关闭，按需在 UI 勾选。
     """
     stages = [
         Stage("warp", "几何校正", stage_warp, WARP_SPEC),
@@ -167,6 +204,8 @@ def build_default_stages() -> list[Stage]:
         Stage("white_balance", "白平衡", stage_white_balance, WB_SPEC, enabled=False),
         Stage("enhance", "对比度增强", stage_enhance, ENHANCE_SPEC, enabled=False),
         Stage("freq", "去网纹", stage_freq_denoise, FREQ_SPEC, enabled=False),
+        Stage("restore", "退化复原", stage_restore, RESTORE_SPEC, enabled=False),
+        Stage("sharpen", "锐化", stage_sharpen, SHARPEN_SPEC, enabled=False),
         Stage("binarize", "二值化", stage_binarize, BINARIZE_SPEC),
     ]
     for s in stages:
