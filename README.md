@@ -38,10 +38,31 @@ uv pip install -e ".[dev,ocr]"
 .venv/Scripts/python -m pytest -q
 
 # 3) 命令行处理一张图
-.venv/Scripts/python -m docscan --cli samples/demo/a.jpg -o out.png --mode bw
+.venv/Scripts/python -m docscan --cli samples/demo/tilted_doc.jpg -o out.png --mode bw
 
 # 4) 图形界面
 .venv/Scripts/python -m docscan
+```
+
+## 实验脚本（报告图表）
+
+```bash
+.venv/Scripts/python -m docscan.experiments.exp_sampling --out data/results  # 要求① DPI×位深 CER 热力图
+.venv/Scripts/python -m docscan.experiments.exp_notch    --out data/results  # 要求④ 三种滤波对比
+.venv/Scripts/python -m docscan.experiments.exp_wiener   --out data/results  # 要求⑤ K 扫描曲线
+.venv/Scripts/python -m docscan.experiments.exp_e2e      --out data/results  # 要求⑦ 五场景端到端
+.venv/Scripts/python tools/make_report_assets.py                             # 各模块 before/after 素材
+.venv/Scripts/python tools/bench.py                                          # 冷启动 + 12MP 基准
+```
+
+OCR 用 RapidOCR（本地 onnxruntime，**断网可用**）；未安装时实验自动降级为 SSIM 代理指标。
+
+## 打包
+
+```bash
+.venv/Scripts/python -m PyInstaller docscan.spec --noconfirm          # lite 版（无 OCR）
+DOCSCAN_FULL=1 .venv/Scripts/python -m PyInstaller docscan.spec --noconfirm  # full 版（含 OCR）
+# 产物：dist/docscan/docscan.exe（onedir，双击即用）
 ```
 
 ## 开发约定
