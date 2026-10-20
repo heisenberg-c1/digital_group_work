@@ -70,13 +70,84 @@ def adaptive(
     return cv2.adaptiveThreshold(g, 255, flag, bin_flag, block_size, c)
 
 
+def sauvola(
+    gray: Image,
+    *,
+    window: int = 25,
+    k: float = 0.2,
+    r: float = 128.0,
+) -> Image:
+    """Sauvola 局部二值化（积分图加速），公式与 skimage 一致。
+
+    阈值::
+
+        T(x,y) = m(x,y) · [1 + k · (σ(x,y)/R − 1)]
+
+    相比自适应均值法，Sauvola 用局部标准差 σ 动态修正偏置：在接近纯白的
+    背景区（σ≈0）阈值贴近均值本身，不会把纸面纹理判成文字；在笔画附近
+    （σ 大）阈值下压，保住细笔画。R 是动态范围归一因子（8-bit 惯例取 128）。
+
+    Args:
+        gray: 灰度图。
+        window: 邻域边长（奇数，≥3）。
+        k: 敏感度参数，文献常用 0.2~0.5。
+        r: 动态范围参数，与 skimage 默认一致取 128 以便对拍。
+
+    Returns:
+        uint8 {0, 255}，白底黑字。
+
+    Raises:
+        ValueError: window 不是奇数或 < 3。
+    """
+    if window < 3 or window % 2 == 0:
+        raise ValueError(f"window 必须是 ≥3 的奇数，收到 {window}")
+
+    f = to_gray(gray).astype(np.float64)
+    h, w = f.shape
+    half = window // 2
+
+    # reflect 填充后做积分图：边界窗口大小恒定，且与 skimage 的
+    # uniform_filter(mode='reflect') 语义一致，保证 oracle 对拍成立
+    padded = np.pad(f, half, mode="reflect")
+    integral = cv2.integral(padded)          # (h+2half+1, w+2half+1)
+    integral_sq = cv2.integral(padded * padded)
+
+    ys = np.arange(h)
+    xs = np.arange(w)
+    y0 = ys                       # 填充后窗口不再需要裁边
+    y1 = ys + window
+    x0 = xs
+    x1 = xs + window
+
+    s = (
+        integral[np.ix_(y1, x1)]
+        - integral[np.ix_(y0, x1)]
+        - integral[np.ix_(y1, x0)]
+        + integral[np.ix_(y0, x0)]
+    )
+    s2 = (
+        integral_sq[np.ix_(y1, x1)]
+        - integral_sq[np.ix_(y0, x1)]
+        - integral_sq[np.ix_(y1, x0)]
+        + integral_sq[np.ix_(y0, x0)]
+    )
+    n = float(window * window)
+    mean = s / n
+    var = np.maximum(s2 / n - mean * mean, 0.0)
+    std = np.sqrt(var)
+
+    threshold = mean * (1.0 + k * (std / r - 1.0))
+    return ((f > threshold) * 255).astype(np.uint8)
+
+
 def clean_small_components(binary: Image, *, min_area: int = 8) -> Image:
     """按连通域面积过滤孤立噪点，保留面积 ≥ ``min_area`` 的前景块。
 
-    以「墨迹=前景」处理：内部先反相，使文字为 255，再过滤。
+    以「墨迹=前景」处理：内部统一为黑字白底 → 反相使墨迹为 255 →
+    过滤连通域 → 按输入极性还原。
 
     Args:
-        binary: uint8 二值图（白底黑字或黑底白字皆可，按少数派自动判断）。
+        binary: uint8 二值图（白底黑字或黑底白字皆可，自动判断极性）。
         min_area: 最小保留面积（像素数）。
 
     Returns:
@@ -86,15 +157,19 @@ def clean_small_components(binary: Image, *, min_area: int = 8) -> Image:
     if arr.ndim == 3:
         arr = to_gray(arr)
 
-    # 前景 = 较暗的一类（文字）。若前景像素反而更多，说明是黑底白字，先反相。
-    fg = (arr == 0).astype(np.uint8)
-    inverted = fg.mean() > 0.5
-    work = (255 - arr) if inverted else arr
+    # 极性统一：暗像素占多数说明是「白字黑底」，先反相成标准黑字白底
+    inverted_input = (arr < 128).mean() > 0.5
+    if inverted_input:
+        arr = 255 - arr
 
-    num, labels, stats, _ = cv2.connectedComponentsWithStats(work, connectivity=8)
-    out = np.zeros_like(work)
+    ink = 255 - arr  # 墨迹 = 255
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(ink, connectivity=8)
+    kept = np.zeros_like(ink)
     for i in range(1, num):
         if stats[i, cv2.CC_STAT_AREA] >= min_area:
-            out[labels == i] = 255
+            kept[labels == i] = 255
 
-    return (255 - out) if inverted else out
+    out = 255 - kept  # 回到白底黑字
+    if inverted_input:
+        out = 255 - out
+    return out

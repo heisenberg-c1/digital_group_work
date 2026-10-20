@@ -75,6 +75,30 @@ def ssim(ref: Image, test: Image) -> float:
     return float(local.mean())
 
 
+def cer(reference: str, hypothesis: str) -> float:
+    """字符错误率（Character Error Rate）::
+
+        CER = 编辑距离（Levenshtein） / 参考文本长度
+
+    比较前去除所有空白字符（OCR 输出的换行/空格不属于识别错误）。
+
+    边界约定：参考为空时，识别也为空 → 0.0；识别非空 → 1.0（全错）。
+    """
+    ref = "".join(reference.split())
+    hyp = "".join(hypothesis.split())
+    if not ref:
+        return 0.0 if not hyp else 1.0
+
+    prev = list(range(len(hyp) + 1))
+    for i, rc in enumerate(ref, 1):
+        cur = [i]
+        for j, hc in enumerate(hyp, 1):
+            cost = 0 if rc == hc else 1
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost))
+        prev = cur
+    return prev[-1] / len(ref)
+
+
 def sharpness(gray: Image) -> float:
     """清晰度：拉普拉斯响应方差（Tenengrad 变体）。
 
