@@ -29,13 +29,20 @@ def make_page(
     """
     canvas = PILImage.new("RGB", (width, height), (paper, paper, paper))
     draw = ImageDraw.Draw(canvas)
+    margin = max(6, min(margin, width // 6, height // 6))
     x0, x1 = margin, width - margin
     y = margin
     step = max(10, (height - 2 * margin) // max(line_count, 1))
-    for i in range(line_count):
-        right = x1 - (i % 4) * (width // 12)
-        draw.rectangle([x0, y, right, y + max(4, step // 3)], fill=(ink, ink, ink))
-        y += step
+    if x1 - x0 >= 12 and step >= 10:
+        for i in range(line_count):
+            if y + step > height - margin:
+                break
+            right = x1 - (i % 4) * ((x1 - x0) // 6)
+            draw.rectangle([x0, y, right, y + max(4, step // 3)], fill=(ink, ink, ink))
+            y += step
+    else:
+        # 画布太小放不下文字行：画一条中线保证仍有前景内容
+        draw.rectangle([x0, height // 2 - 2, x1, height // 2 + 2], fill=(ink, ink, ink))
     # 外框：给四点检测一个明确的矩形边界
     draw.rectangle([2, 2, width - 3, height - 3], outline=(ink, ink, ink), width=3)
     return cv2.cvtColor(np.asarray(canvas), cv2.COLOR_RGB2BGR)
