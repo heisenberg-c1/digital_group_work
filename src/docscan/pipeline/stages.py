@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-from docscan.core import binarize, color, enhance, geometry, illumination
+from docscan.core import binarize, color, enhance, freq, geometry, illumination
 from docscan.core.types import Image, to_uint8
 
 # 参数规格：(键, 中文标签, 默认值, 最小值, 最大值)
@@ -103,6 +103,34 @@ def stage_enhance(
     return out, f"CLAHE clip={clip:g}, gamma={gamma:g}", {}
 
 
+def stage_freq_denoise(
+    img: Image, params: dict
+) -> tuple[Image, str, dict[str, float]]:
+    """频域去网纹阶段：自动找峰或使用 UI 手动选点。"""
+    manual = params.get("manual_peaks") or []
+    if manual:
+        peaks = [(int(du), int(dv)) for du, dv in manual]
+        source = "手动选点"
+    else:
+        spec = freq.magnitude_spectrum(img)
+        peaks = freq.find_periodic_peaks(
+            spec, top_n=int(params.get("top_n", 4))
+        )
+        source = "自动找峰"
+    if not peaks:
+        return img, "未发现周期峰，跳过滤波", {"peaks": 0.0}
+
+    kind = str(params.get("kind", "butterworth"))
+    out = freq.notch_filter(
+        img, peaks, kind=kind,
+        radius=int(params.get("radius", 0)) or None,
+        order=int(params.get("order", 4)),
+    )
+    drop = freq.energy_drop_db(img, out, peaks[0])
+    note = f"{source} {len(peaks)} 点: {peaks[:4]}"
+    return out, note, {"peaks": float(len(peaks)), "peak_drop_db": drop}
+
+
 WARP_SPEC: list[ParamSpec] = [
     ("min_confidence", "角点置信度阈值", 0.6, 0.0, 1.0),
 ]
@@ -121,19 +149,24 @@ BINARIZE_SPEC: list[ParamSpec] = [
     ("c", "阈值偏置 C", 10.0, 0.0, 40.0),
     ("min_area", "最小连通域", 8, 0, 200),
 ]
+FREQ_SPEC: list[ParamSpec] = [
+    ("top_n", "自动找峰数量", 4, 1, 12),
+    ("radius", "陷波半径(0=自适应)", 0.0, 0.0, 40.0),
+    ("order", "Butterworth 阶数", 4.0, 1.0, 16.0),
+]
 
 
 def build_default_stages() -> list[Stage]:
-    """默认处理链：几何校正 → 光照归一 → 白平衡 → 增强 → 二值化。
+    """默认处理链：几何校正 → 光照归一 → 白平衡 → 增强 → 去网纹 → 二值化。
 
-    白平衡与增强默认关闭（对已正常的扫描件反而引入风险），UI 上勾选启用。
-    后续迭代在此追加频域与复原阶段。
+    白平衡、增强、去网纹默认关闭（按需在 UI 勾选），后续迭代追加复原阶段。
     """
     stages = [
         Stage("warp", "几何校正", stage_warp, WARP_SPEC),
         Stage("illumination", "光照归一", stage_illumination, ILLUM_SPEC),
         Stage("white_balance", "白平衡", stage_white_balance, WB_SPEC, enabled=False),
         Stage("enhance", "对比度增强", stage_enhance, ENHANCE_SPEC, enabled=False),
+        Stage("freq", "去网纹", stage_freq_denoise, FREQ_SPEC, enabled=False),
         Stage("binarize", "二值化", stage_binarize, BINARIZE_SPEC),
     ]
     for s in stages:
