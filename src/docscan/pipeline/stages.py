@@ -12,8 +12,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import cv2
+import numpy as np
 
-from docscan.core import binarize, geometry
+from docscan.core import binarize, color, enhance, geometry, illumination
 from docscan.core.types import Image, to_uint8
 
 # 参数规格：(键, 中文标签, 默认值, 最小值, 最大值)
@@ -63,8 +64,57 @@ def stage_binarize(
     return out, f"blockSize={block}, C={c:g}", {"ink_ratio": ink}
 
 
+def stage_illumination(
+    img: Image, params: dict
+) -> tuple[Image, str, dict[str, float]]:
+    """光照归一阶段：背景估计去阴影。"""
+    sigma = float(params.get("sigma", 30.0))
+    out = illumination.remove_shading(img, sigma=sigma)
+    before = float(np.asarray(to_uint8(img)).std())
+    after = float((to_uint8(out)).std())
+    return out, f"sigma={sigma:g}", {"std_before": before, "std_after": after}
+
+
+def stage_white_balance(
+    img: Image, params: dict
+) -> tuple[Image, str, dict[str, float]]:
+    """白平衡阶段：灰世界 / 白块估计。"""
+    method = str(params.get("method", "white_patch"))
+    strength = float(params.get("strength", 1.0))
+    if method == "gray_world":
+        out = color.gray_world(img, strength=strength)
+    elif method == "white_patch":
+        out = color.white_patch(img, strength=strength)
+    else:
+        raise ValueError(f"未知白平衡方法：{method}")
+    return out, f"{method}, strength={strength:g}", {}
+
+
+def stage_enhance(
+    img: Image, params: dict
+) -> tuple[Image, str, dict[str, float]]:
+    """对比度增强阶段：CLAHE（只在亮度通道）。"""
+    clip = float(params.get("clip_limit", 2.0))
+    grid = int(params.get("grid_size", 8))
+    gamma = float(params.get("gamma", 1.0))
+    out = enhance.clahe(img, clip_limit=clip, grid_size=grid)
+    if gamma != 1.0:
+        out = enhance.apply_gamma(out, gamma)
+    return out, f"CLAHE clip={clip:g}, gamma={gamma:g}", {}
+
+
 WARP_SPEC: list[ParamSpec] = [
     ("min_confidence", "角点置信度阈值", 0.6, 0.0, 1.0),
+]
+ILLUM_SPEC: list[ParamSpec] = [
+    ("sigma", "光照场尺度", 30.0, 5.0, 120.0),
+]
+WB_SPEC: list[ParamSpec] = [
+    ("strength", "校正强度", 1.0, 0.0, 1.0),
+]
+ENHANCE_SPEC: list[ParamSpec] = [
+    ("clip_limit", "CLAHE 削波", 2.0, 0.1, 10.0),
+    ("gamma", "伽马", 1.0, 0.2, 3.0),
 ]
 BINARIZE_SPEC: list[ParamSpec] = [
     ("block_size", "邻域边长(奇数)", 31, 3, 151),
@@ -74,9 +124,16 @@ BINARIZE_SPEC: list[ParamSpec] = [
 
 
 def build_default_stages() -> list[Stage]:
-    """M1 默认处理链：几何校正 → 二值化。后续迭代在此追加阶段。"""
+    """默认处理链：几何校正 → 光照归一 → 白平衡 → 增强 → 二值化。
+
+    白平衡与增强默认关闭（对已正常的扫描件反而引入风险），UI 上勾选启用。
+    后续迭代在此追加频域与复原阶段。
+    """
     stages = [
         Stage("warp", "几何校正", stage_warp, WARP_SPEC),
+        Stage("illumination", "光照归一", stage_illumination, ILLUM_SPEC),
+        Stage("white_balance", "白平衡", stage_white_balance, WB_SPEC, enabled=False),
+        Stage("enhance", "对比度增强", stage_enhance, ENHANCE_SPEC, enabled=False),
         Stage("binarize", "二值化", stage_binarize, BINARIZE_SPEC),
     ]
     for s in stages:
