@@ -15,6 +15,8 @@
 
 import os
 
+from PyInstaller.utils.hooks import collect_data_files
+
 FULL = os.environ.get("DOCSCAN_FULL", "") not in ("", "0")
 
 block_cipher = None
@@ -26,10 +28,11 @@ excludedlibs = [
     "matplotlib",
     "pytest",
     "tkinterdnd2",
-    "sv_ttk",
     "pandas",
     "IPython",
 ]
+# sv-ttk 的主题是包内 .tcl + png 素材，运行时按文件路径加载，必须随包收集
+datas = collect_data_files("sv_ttk")
 if FULL:
     hiddenimports += [
         "rapidocr_onnxruntime",
@@ -45,7 +48,7 @@ a = Analysis(
     ["run_docscan.py"],
     pathex=["src"],
     binaries=[],
-    datas=[],
+    datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],

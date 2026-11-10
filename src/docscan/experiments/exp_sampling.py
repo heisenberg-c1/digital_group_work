@@ -7,8 +7,16 @@
     python -m docscan.experiments.exp_sampling --out data/results
 
 产物：sampling.csv（dpi,bits,metric 矩阵）+ sampling_heatmap.png
-DPI 用「面积插值降采样 + 立方插值还原」模拟；位深用均匀量化模拟。
-OCR 可用时指标为 CER（越小越好），否则为 SSIM 代理（越大越好）。
+
+实验设计要点（这一版修正了两个会让结论失真的地方）：
+
+* **页面按真实 300 DPI 渲染**（A4 → 2480×3508，字号 42 px ≈ 10 pt）。
+  早期版本用 1240×1754（其实是 150 DPI）却把 base_dpi 标成 300，
+  等于把采样率标签整体放大一倍，且字号偏大（20 pt）——降到 75 DPI
+  时单字仍有 21 px，OCR 照样读得出来，曲线因此不单调；
+* **DPI 用「面积插值降采样 + 立方插值还原」模拟**（降采样丢信息、还原只补
+  插值不补信息），位深用均匀量化模拟；指标是真实 OCR 的 CER，
+  OCR 不可用时降级为 SSIM 损失（CSV 首行标注 metric 列名）。
 """
 
 from __future__ import annotations
@@ -31,10 +39,15 @@ log = logging.getLogger("docscan.experiments")
 DPIS = (75, 100, 150, 200, 300)
 BITS = (1, 2, 4, 8)
 
+# A4 @ 300 DPI；字号 42 px ≈ 10 pt，接近正文的实际大小
+PAGE_W, PAGE_H, FONT_PX, MARGIN = 2480, 3508, 42, 180
+
 
 def run(*, out_dir: Path, base_dpi: int = 300) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    page, gt_text = utils.render_text_page()
+    page, gt_text = utils.render_text_page(
+        width=PAGE_W, height=PAGE_H, font_px=FONT_PX, margin=MARGIN
+    )
     gray = cv2.cvtColor(page, cv2.COLOR_BGR2GRAY)
     recognizer = utils.TextRecognizer()
     use_cer = recognizer.uses_ocr

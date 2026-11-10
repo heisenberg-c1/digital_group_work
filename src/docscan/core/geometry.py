@@ -40,9 +40,13 @@ def _polygon_area(pts: np.ndarray) -> float:
 def order_points(points: np.ndarray) -> np.ndarray:
     """把任意顺序的四个点规范为 左上、右上、右下、左下。
 
-    做法：按质心极角排序得到环序 → 用鞋带公式统一绕向 → 旋转环序使
-    最小 y（同 y 取最小 x）的点排在首位。相比 ``sum/diff`` 排序，该写法在
-    极端退化四边形（细长、强旋转）上不会出现两点落到同一象限的错误。
+    做法：按质心极角排序得到环序 → 用鞋带公式统一绕向（屏幕坐标 y 向下，
+    顺时针为正）→ 旋转环序使「x+y 最小」的点排在首位。
+
+    起点为什么不用「最小 y」：页面轻微逆时针旋转时（手机斜拍的常态，
+    3°~5° 就够），最高点其实是**右上角**，用它当 tl 会让整幅图被转 90°
+    并转置（实测 900×1200 的页面输出成 1056×796）。``x+y`` 对 ±45° 以内的
+    旋转都能稳定指向真正的左上角，而环序已经保证了相邻关系，只需选起点。
 
     Args:
         points: (4, 2) 任意顺序的四个点。
@@ -61,7 +65,7 @@ def order_points(points: np.ndarray) -> np.ndarray:
     if signed < 0:
         pts = pts[::-1]
 
-    start = int(np.lexsort((pts[:, 0], pts[:, 1]))[0])
+    start = int(np.argmin(pts[:, 0] + pts[:, 1]))
     pts = np.roll(pts, -start, axis=0)
     return pts.astype(np.float32)
 
@@ -231,6 +235,7 @@ def detect_quad(
     img_area = float(sh * sw)
     k = max(3, round(min(sh, sw) * 0.01) | 1)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    edges = cv2.Canny(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), 60, 140)
 
     best_quad: np.ndarray | None = None
     best_score = -1.0
@@ -241,6 +246,9 @@ def detect_quad(
             # 四点全部贴边 = 检测到的其实是整幅画面，多半没找到纸面，压低置信度
             if _touches_border(cand, sw, sh):
                 score *= 0.75
+            # 边界必须有真实边缘支撑，否则是光照渐变被阈值切出的伪边界
+            support = _edge_support(cand, edges)
+            score *= 0.25 + 0.75 * support
             if score > best_score:
                 best_score, best_quad = score, cand
 
@@ -260,6 +268,31 @@ def _touches_border(quad: np.ndarray, w: int, h: int, tol: int = 3) -> bool:
         if x <= tol or x >= w - 1 - tol or y <= tol or y >= h - 1 - tol:
             near += 1
     return near == 4
+
+
+def _edge_support(
+    quad: np.ndarray, edges: np.ndarray, *, tol: int = 2, samples_per_edge: int = 40
+) -> float:
+    """四边形四条边上「落在强边缘附近」的采样点比例，0~1。
+
+    这是把「纸面边界」和「光照渐变造成的伪边界」区分开的关键：纸边是真实
+    的亮度跃变，Canny 响应连续；而阴影渐变被 Otsu 切成两半时，那条分界线
+    在梯度上是缓坡，Canny 基本不响应。实测全幅页 + 侧光场景里，伪候选的
+    支撑度 0.03，真实斜拍页面的支撑度 1.00——两者可以干净分开。
+    """
+    if edges is None or edges.size == 0:
+        return 1.0
+    band = cv2.dilate(edges, np.ones((2 * tol + 1, 2 * tol + 1), np.uint8))
+    h, w = band.shape
+    pts = []
+    for i in range(4):
+        a, b = quad[i], quad[(i + 1) % 4]
+        for t in np.linspace(0.0, 1.0, samples_per_edge):
+            pts.append(a + t * (b - a))
+    pts = np.asarray(pts, dtype=np.float64)
+    xs = np.clip(np.rint(pts[:, 0]).astype(int), 0, w - 1)
+    ys = np.clip(np.rint(pts[:, 1]).astype(int), 0, h - 1)
+    return float((band[ys, xs] > 0).mean())
 
 
 def warp_perspective(

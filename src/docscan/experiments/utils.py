@@ -7,7 +7,9 @@ CER 实验需要「有真文字」的页面（纯色条无法算 CER），所以
 
 from __future__ import annotations
 
+import csv
 import logging
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 import cv2
@@ -120,6 +122,22 @@ class TextRecognizer:
                 self._warned = True
             return None
         return self.engine.recognize(img)
+
+
+def write_csv(path: Path, header: Sequence[str], rows: Iterable[Sequence]) -> Path:
+    """写实验结果 CSV（字段自动转义）。
+
+    不要用 ``",".join(...)`` 手工拼行：方法名/标签一旦含逗号（如
+    ``Sauvola(25,k=0.2)``、``自适应均值(31,C=10)``），字段会被拆成两列，
+    整张表错位且不报错——只有用 ``csv.DictReader`` 读时才以 ``KeyError``
+    暴露出来（历史缺陷 D8）。``csv.writer`` 会按 RFC 4180 加引号。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(list(header))
+        writer.writerows(rows)
+    return path
 
 
 def setup_matplotlib_cjk() -> None:

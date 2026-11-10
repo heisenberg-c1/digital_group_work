@@ -11,6 +11,10 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
+import numpy as np
+
+from docscan.core import metrics as metrics_mod
 from docscan.core.types import Image, StageResult
 from docscan.io.loader import load_any
 from docscan.pipeline.runner import Runner, RunResult
@@ -28,6 +32,28 @@ class QueueMessage:
     stage_result: StageResult | None = None
     result: RunResult | None = None
     error: str = ""
+    psnr: float | None = None
+    ssim: float | None = None
+    aligned: bool = False
+
+
+def _compare_with_source(source: Image, final: Image) -> tuple[float | None, float | None, bool]:
+    """最终结果 vs 原图的 PSNR / SSIM（在 worker 线程算，避免卡 UI）。
+
+    几何校正会改变尺寸：先把参考图缩放到结果尺寸再比较，返回是否做过对齐。
+    """
+    try:
+        ref = np.asarray(source)
+        test = np.asarray(final)
+        aligned = False
+        if ref.shape[:2] != test.shape[:2]:
+            ref = cv2.resize(
+                ref, (test.shape[1], test.shape[0]), interpolation=cv2.INTER_AREA
+            )
+            aligned = True
+        return metrics_mod.psnr(ref, test), metrics_mod.ssim(ref, test), aligned
+    except Exception:
+        return None, None, False
 
 
 class AppController:
@@ -40,6 +66,7 @@ class AppController:
         self.stages: list[Stage] = build_default_stages()
         self.runner = Runner(self.stages)
         self.image: Image | None = None
+        self.image_path: str | None = None
         self.last_result: RunResult | None = None
 
     def start(self) -> None:
@@ -56,9 +83,10 @@ class AppController:
             self.view.show_error("打开失败", str(exc))
             return
         self.image = pages[0]
+        self.image_path = str(path)
         if len(pages) > 1:
             self.view.log(f"PDF 共 {len(pages)} 页，当前显示第 1 页（批处理请用 CLI）")
-        self.view.show_source_image(self.image)
+        self.view.show_source_image(self.image, path=str(path))
         self.view.log(f"已打开 {Path(path).name}（{self.image.shape[1]}×{self.image.shape[0]}）")
         self.view.set_status(f"已打开：{Path(path).name}")
 
@@ -83,17 +111,53 @@ class AppController:
 
             try:
                 result = self.runner.run(image, progress_cb=on_stage)
-                q.put(QueueMessage(kind="done", result=result))
+                psnr, ssim, aligned = _compare_with_source(image, result.final)
+                q.put(
+                    QueueMessage(
+                        kind="done", result=result, psnr=psnr, ssim=ssim, aligned=aligned
+                    )
+                )
             except Exception as exc:
                 q.put(QueueMessage(kind="error", error=str(exc)))
 
         self.worker = threading.Thread(target=worker, name="docscan-worker", daemon=True)
         self.worker.start()
 
+    # ---- 阶段与参数 ----
+
     def set_stage_enabled(self, name: str, enabled: bool) -> None:
         self.runner.set_enabled(name, enabled)
         stage = self.runner.get_stage(name)
         self.view.log(f"阶段「{stage.label}」{'启用' if enabled else '停用'}")
+
+    def set_stage_param(self, name: str, key: str, value) -> None:
+        """参数面板回调：热写回 stage.params，下次运行生效。"""
+        stage = self.runner.get_stage(name)
+        stage.params[key] = value
+        self.view.log(f"{stage.label} · {key} = {value}")
+
+    def reset_stage_params(self, name: str) -> None:
+        stage = self.runner.get_stage(name)
+        stage.reset_params()
+        self.view.log(f"阶段「{stage.label}」参数已恢复默认")
+
+    # ---- 预设 ----
+
+    def save_preset(self, path: str | Path) -> None:
+        """把当前阶段开关与参数存成 JSON 预设。"""
+        from docscan.pipeline.config import PipelineConfig
+
+        written = PipelineConfig.from_stages(self.stages).save(path)
+        self.view.log(f"预设已保存：{written}")
+        self.view.set_status(f"预设已保存：{Path(written).name}")
+
+    def load_preset(self, path: str | Path) -> None:
+        """从 JSON 预设恢复阶段开关与参数（未识别的键忽略）。"""
+        from docscan.pipeline.config import PipelineConfig
+
+        PipelineConfig.load(path).apply_to(self.stages)
+        self.view.log(f"预设已加载：{Path(path).name}")
+        self.view.set_status(f"预设已加载：{Path(path).name}")
 
     def apply_manual_peaks(self, points: list[tuple[int, int]]) -> None:
         """频谱视图选点 → 写入去网纹阶段参数并启用。"""
@@ -128,7 +192,7 @@ class AppController:
                     self.view.on_stage_done(msg.stage_name, msg.stage_result)
                 elif msg.kind == "done":
                     self.last_result = msg.result
-                    self.view.on_run_finished(msg.result)
+                    self.view.on_run_finished(msg.result, msg.psnr, msg.ssim, msg.aligned)
                 elif msg.kind == "error":
                     self.view.show_error("处理失败", msg.error)
                     self.view.set_busy(False)

@@ -16,7 +16,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image as PILImage, ImageDraw, ImageFont
+from PIL import Image as PILImage
+from PIL import ImageDraw, ImageFont
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
@@ -28,7 +29,7 @@ from docscan.core import (  # noqa: E402
     metrics,
     restore,
 )
-from docscan.experiments.synth import add_moire, add_shadow, synthesize
+from docscan.experiments.synth import add_moire, synthesize  # noqa: E402
 from docscan.experiments.utils import render_text_page  # noqa: E402
 
 FONT_PATH = None
@@ -42,7 +43,7 @@ TARGET_W = 640  # 统一半幅宽度
 
 def _label(img: np.ndarray, text: str) -> np.ndarray:
     """底部加中文标注条。"""
-    h, w = img.shape[:2]
+    _h, w = img.shape[:2]
     bar = np.full((44, w), 248, np.uint8)
     pil = PILImage.fromarray(bar).convert("RGB")
     draw = ImageDraw.Draw(pil)
@@ -98,13 +99,12 @@ def main(argv: list[str] | None = None) -> int:
     gray = cv2.cvtColor(page, cv2.COLOR_BGR2GRAY)
 
     # ① 几何校正
-    quad = np.array([[150, 200], [880, 260], [820, 1330], [200, 1240]], np.float32)
-    from docscan.experiments.synth import synthesize  # noqa: F401
+    np.array([[150, 200], [880, 260], [820, 1330], [200, 1240]], np.float32)
 
     import sys as _sys
 
     _sys.path.insert(0, str(REPO / "tests"))
-    from conftest import paste_on_background  # noqa: E402
+    from conftest import paste_on_background
 
     small = cv2.resize(page, (620, 880))
     tilted = paste_on_background(

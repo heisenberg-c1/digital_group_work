@@ -47,6 +47,53 @@ class TestYCbCr:
         assert float(np.abs(out - bgr).max()) * 255.0 <= 1.0
 
 
+class TestHSV:
+    """HSV 是要求②里与 YCbCr 并列的第二套「亮度/色度分离」通道。"""
+
+    def test_roundtrip_is_exact(self):
+        rng = np.random.default_rng(13)
+        bgr = rng.uniform(0, 1, size=(48, 64, 3)).astype(np.float32)
+        h, s, v = colorspace.bgr_to_hsv(bgr)
+        back = colorspace.hsv_to_bgr(h, s, v)
+        assert float(np.abs(back - bgr).max()) < 1e-5
+
+    def test_primaries_hue(self):
+        """纯 B/G/R 的色相应落在 240/120/0 度。"""
+        img = np.zeros((1, 3, 3), np.float32)
+        img[0, 0] = (1.0, 0.0, 0.0)  # B
+        img[0, 1] = (0.0, 1.0, 0.0)  # G
+        img[0, 2] = (0.0, 0.0, 1.0)  # R
+        h, s, _v = colorspace.bgr_to_hsv(img)
+        assert abs(h[0, 0] - 240.0) < 1e-6
+        assert abs(h[0, 1] - 120.0) < 1e-6
+        assert abs(h[0, 2] - 0.0) < 1e-6
+        np.testing.assert_allclose(s, 1.0, atol=1e-6)
+
+    def test_gray_has_zero_saturation(self):
+        img = np.full((16, 16, 3), 0.4, np.float32)
+        _h, s, v = colorspace.bgr_to_hsv(img)
+        assert float(s.max()) == 0.0
+        assert float(np.abs(v - 0.4 * 255.0).max()) < 1e-4
+
+    def test_apply_on_value_keeps_hue_and_saturation(self):
+        """只改 V 时色相与饱和度逐元素不变（这是「分离亮度与色度」的定义）。"""
+        rng = np.random.default_rng(17)
+        bgr = rng.uniform(0.2, 0.9, size=(40, 50, 3)).astype(np.float32)
+        out = colorspace.apply_on_value(bgr, lambda v: 0.6 * v)
+        h0, s0, _ = colorspace.bgr_to_hsv(bgr)
+        h1, s1, v1 = colorspace.bgr_to_hsv(out)
+        assert float(np.abs(h1 - h0).max()) < 1e-3
+        assert float(np.abs(s1 - s0).max()) < 1e-4
+        # 明度确实被压缩
+        assert float(v1.mean()) < float(colorspace.bgr_to_hsv(bgr)[2].mean())
+
+    def test_requires_three_channels(self):
+        import pytest
+
+        with pytest.raises(ValueError):
+            colorspace.bgr_to_hsv(np.zeros((8, 8), np.float32))
+
+
 class TestGrayWorld:
     def test_balanced_image_is_identity(self):
         """已白平衡（三通道均值相等）的图 → 恒等（±1 灰度级）。"""

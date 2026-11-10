@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 import pytest
 
@@ -112,6 +113,72 @@ class TestStageParams:
         assert stages["binarize"].params["block_size"] == 31
 
 
+class TestStageBehaviours:
+    """针对审计缺陷的回归测试：这些路径原先没有测试覆盖。"""
+
+    def test_denoise_stage_exists_and_disabled_by_default(self):
+        stages = {s.name: s for s in build_default_stages()}
+        assert "denoise" in stages
+        assert stages["denoise"].enabled is False
+        # 顺序：增强之后、去网纹之前（先去噪再陷波/复原）
+        names = [s.name for s in build_default_stages()]
+        assert names.index("enhance") < names.index("denoise") < names.index("freq")
+
+    def test_enhance_none_applies_only_gamma(self):
+        from docscan.pipeline.stages import stage_enhance
+
+        img = make_page(120, 160)
+        out, note, _ = stage_enhance(img, {"method": "none", "gamma": 1.0})
+        assert note == "不增强"
+        np.testing.assert_array_equal(out, img)
+
+    def test_warp_accepts_grayscale(self):
+        """灰度输入不应让几何校正阶段直接抛异常（否则灰度链静默跳过校正）。"""
+        from docscan.pipeline.stages import stage_warp
+
+        gray = make_page(400, 560)[..., 0]
+        out, note, metrics_out = stage_warp(gray, {"min_confidence": 0.6})
+        assert out.ndim == 2
+        assert "confidence" in metrics_out
+        assert "需要三通道" not in note
+
+    def test_restore_defocus_and_inverse(self):
+        from docscan.pipeline.stages import stage_restore
+
+        img = make_page(240, 320)
+        _, note, m = stage_restore(
+            img, {"psf_type": "defocus", "defocus_radius": 5, "filter": "wiener", "K": 0.01}
+        )
+        assert "散焦" in note and m["psf_radius"] == 5.0
+
+        _, note2, _ = stage_restore(
+            img,
+            {
+                "psf_type": "motion", "psf_mode": "manual", "length": 9,
+                "angle_deg": 0.0, "filter": "inverse", "eps": 1e-3,
+            },
+        )
+        assert "逆滤波" in note2 and "手动 PSF" in note2
+
+    def test_restore_reports_failure_instead_of_raising(self):
+        """倒谱估不出 PSF 时返回原图 + 明确说明，而不是把异常抛给 Runner。"""
+        from docscan.pipeline.stages import stage_restore
+
+        flat = np.full((200, 200, 3), 200, np.uint8)
+        out, note, _ = stage_restore(flat, {"psf_type": "motion", "psf_mode": "est"})
+        assert out is flat
+        assert "失败" in note or "倒谱" in note
+
+    def test_freq_stage_flags_ineffective_notch(self):
+        """陷波无效（伪峰）时必须置 notch_ok=0 并在 note 里提示。"""
+        from docscan.pipeline.stages import stage_freq_denoise
+
+        img = np.full((200, 200, 3), 200, np.uint8)  # 平坦图：非 DC 处无能量
+        _, note, m = stage_freq_denoise(img, {"manual_peaks": [(20, 20)], "radius": 4})
+        assert m["notch_ok"] == 0.0
+        assert "手动选点" in note
+
+
 class TestPipelineConfig:
     def test_roundtrip_json(self, tmp_path):
         stages = build_default_stages()
@@ -134,3 +201,103 @@ class TestPipelineConfig:
         fresh = build_default_stages()
         cfg.apply_to(fresh)  # 不应抛异常
         assert fresh[0].enabled is True
+
+
+class TestEnhanceStageMethods:
+    """D5 回归：空间域方法必须真的接入，且未知方法不得静默回退。"""
+
+    @pytest.mark.parametrize("method", ["clahe", "histeq", "stretch", "none"])
+    def test_each_method_produces_its_own_output(self, method):
+        from docscan.pipeline.stages import stage_enhance
+
+        img = make_page(160, 200)
+        out, note, _ = stage_enhance(img, {"method": method, "gamma": 1.0})
+        assert note and out.shape == img.shape
+        if method == "none":
+            np.testing.assert_array_equal(out, img)
+        else:
+            assert not np.array_equal(out, img), f"{method} 未改变图像，等于空转"
+
+    def test_he_alias_maps_to_histeq(self):
+        """组员版实验脚本用 ``he``，必须落到直方图均衡而不是静默走 CLAHE。"""
+        from docscan.pipeline.stages import stage_enhance
+
+        img = make_page(160, 200)
+        by_alias, note_alias, _ = stage_enhance(img, {"method": "he", "gamma": 1.0})
+        by_name, note_name, _ = stage_enhance(img, {"method": "histeq", "gamma": 1.0})
+        assert note_alias == note_name == "直方图均衡"
+        np.testing.assert_array_equal(by_alias, by_name)
+
+    def test_unknown_method_raises(self):
+        from docscan.pipeline.stages import stage_enhance
+
+        with pytest.raises(ValueError, match="未知增强方法"):
+            stage_enhance(make_page(120, 160), {"method": "bogus"})
+
+    def test_stretch_percentiles_are_honoured(self):
+        from docscan.pipeline.stages import stage_enhance
+
+        # 低对比渐变：分位不同则拉伸后的斜率不同（整页纯白/纯黑看不出来）
+        ramp = (0.40 + 0.20 * np.linspace(0, 1, 160)[None, :]).astype(np.float32)
+        img = np.repeat(ramp, 120, axis=0)
+        narrow, note_narrow, _ = stage_enhance(
+            img, {"method": "stretch", "low_pct": 5.0, "high_pct": 95.0}
+        )
+        wide, _, _ = stage_enhance(
+            img, {"method": "stretch", "low_pct": 0.0, "high_pct": 100.0}
+        )
+        assert "5%~95%" in note_narrow
+        assert not np.array_equal(narrow, wide)
+
+
+class TestRestoreStagePsfSelection:
+    """D6 回归：散焦必须用圆盘 PSF，且未知枚举值不得静默回退。"""
+
+    @staticmethod
+    def _defocused():
+        from docscan.core import restore
+
+        page = make_page(240, 320)
+        gray = cv2.cvtColor(page, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+        return gray, cv2.filter2D(gray, -1, restore.disk_psf(31, 5))
+
+    def test_disk_psf_beats_motion_psf_on_defocus(self):
+        from docscan.core import metrics
+        from docscan.pipeline.stages import stage_restore
+
+        gt, degraded = self._defocused()
+        disk, _, m = stage_restore(
+            degraded, {"psf_type": "defocus", "defocus_radius": 5, "K": 0.003}
+        )
+        motion, _, _ = stage_restore(
+            degraded,
+            {"psf_type": "motion", "psf_mode": "manual", "length": 11,
+             "angle_deg": 0.0, "K": 0.003},
+        )
+        ssim_disk = metrics.ssim(gt, disk)
+        ssim_motion = metrics.ssim(gt, motion)
+        assert m["psf_radius"] == 5.0
+        assert ssim_disk > ssim_motion, (
+            f"圆盘 {ssim_disk:.4f} 应优于线段 {ssim_motion:.4f}"
+        )
+
+    def test_disk_alias_accepted(self):
+        from docscan.pipeline.stages import stage_restore
+
+        _, degraded = self._defocused()
+        _, note, m = stage_restore(degraded, {"psf_type": "disk", "defocus_radius": 5})
+        assert "散焦" in note and m["psf_radius"] == 5.0
+
+    @pytest.mark.parametrize(
+        ("params", "match"),
+        [
+            ({"psf_type": "bogus"}, "未知 PSF 类型"),
+            ({"psf_type": "motion", "psf_mode": "bogus"}, "未知 PSF 来源"),
+            ({"psf_type": "motion", "filter": "bogus"}, "未知复原滤波器"),
+        ],
+    )
+    def test_unknown_enum_raises(self, params, match):
+        from docscan.pipeline.stages import stage_restore
+
+        with pytest.raises(ValueError, match=match):
+            stage_restore(make_page(120, 160), params)
