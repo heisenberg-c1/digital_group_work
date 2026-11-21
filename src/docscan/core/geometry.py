@@ -2,14 +2,15 @@
 
 算法链（检测在缩略图上做，变换在全分辨率上做）::
 
-    缩略到 ≤800px → 多路纸面掩膜 → 开闭运算 → 外轮廓
-        → 凸包 + approxPolyDP 取四点 → 多候选打分 → 透视变换
+    缩略到 ≤800px → 多路纸面掩膜 → 先闭后开 → 外轮廓
+        → 凸包 + approxPolyDP 取四点；同时从闭合边缘提取候选
+    → 按形状及四边与图像边缘的贴合程度打分 → 透视变换
 
 设计要点：
-* 掩膜不用固定亮度阈值（暗光下会失效），改用 Otsu 自适应 + 低饱和高亮双路，
-  两路结果一起参与候选打分，任一路成功即可；
+* 掩膜不用固定亮度阈值（暗光下会失效），改用 Otsu 全局自动阈值 + 低饱和高亮掩膜，
+  暗背景下另在较暗像素中估计阈值，使阴影中的纸面也能参与候选打分；
 * 检测失败绝不静默：返回 ``source="fallback"`` 的整图四边形，调用方必须提示；
-* 四点排序用「质心极角 + 定向 + 起点归位」，对 4! 种输入排列结果完全一致。
+* 四点排序用「按质心极角排序，再以 x + y 最小的角为起点」，对 4! 种输入排列结果完全一致。
 """
 
 from __future__ import annotations
@@ -38,17 +39,17 @@ def _polygon_area(pts: np.ndarray) -> float:
 
 
 def order_points(points: np.ndarray) -> np.ndarray:
-    """把任意顺序的四个点规范为 左上、右上、右下、左下。
+    """将凸四边形的四个角点按图像中的顺时针方向排列。
 
-    做法：按质心极角排序得到环序 → 用鞋带公式统一绕向 → 旋转环序使
-    最小 y（同 y 取最小 x）的点排在首位。相比 ``sum/diff`` 排序，该写法在
-    极端退化四边形（细长、强旋转）上不会出现两点落到同一象限的错误。
+    先按各点相对四点中心的极角升序排列，再将 x + y 最小的角移到首位。
+    对于接近正向拍摄的页面，该点通常是纸张左上角。页面大角度旋转时，
+    选出的起点可能对应纸张的其他角。
 
     Args:
         points: (4, 2) 任意顺序的四个点。
 
     Returns:
-        (4, 2) float32，顺序为 tl, tr, br, bl。
+        (4, 2) float32，页面接近正向时通常依次为左上 (tl)、右上 (tr)、右下 (br)、左下 (bl)。
     """
     pts = np.asarray(points, dtype=np.float64).reshape(4, 2)
     centroid = pts.mean(axis=0)
@@ -56,12 +57,14 @@ def order_points(points: np.ndarray) -> np.ndarray:
     order = np.argsort(angles, kind="stable")
     pts = pts[order]
 
-    x, y = pts[:, 0], pts[:, 1]
-    signed = float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
-    if signed < 0:
-        pts = pts[::-1]
-
-    start = int(np.lexsort((pts[:, 0], pts[:, 1]))[0])
+    # 按质心角排序后已经顺时针定序，无需使用鞋带公式统一绕向
+    # x, y = pts[:, 0], pts[:, 1]
+    # signed = float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+    # if signed < 0:
+    #     pts = pts[::-1]
+    
+    #  选 x + y 最小的角作为起点
+    start = int(np.argmin(pts[:, 0] + pts[:, 1]))
     pts = np.roll(pts, -start, axis=0)
     return pts.astype(np.float32)
 
@@ -83,9 +86,8 @@ def _paper_masks(bgr: Image) -> list[np.ndarray]:
 
     masks: list[np.ndarray] = []
 
-    # 路 1：灰度 Otsu。暗背景下纸面是亮区，这一步等价于「自适应亮度阈值」，
-    # 且不依赖绝对亮度值，欠曝场景仍然成立。
-    _, m_gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # 路 1：灰度 Otsu。按整幅图的灰度分布自动选一个阈值，适用于纸面比背景亮的情况。
+    threshold, m_gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     masks.append(m_gray)
 
     # 路 2：HSV 的 V 通道 Otsu + 低饱和约束。纸面「亮且不彩」，能排除彩色桌面。
@@ -95,14 +97,25 @@ def _paper_masks(bgr: Image) -> list[np.ndarray]:
     low_sat = (s_ch < 70).astype(np.uint8) * 255
     masks.append(cv2.bitwise_and(m_v, low_sat))
 
+    # 亮区阈值可能只选中受光的半页。在暗部再次分割背景与受阴影的纸面。
+    dark_pixels = gray[gray <= threshold]
+    if dark_pixels.size and dark_pixels.min() < dark_pixels.max():
+        shadow_threshold, _ = cv2.threshold(
+            dark_pixels, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+        border = np.concatenate((gray[0], gray[-1], gray[:, 0], gray[:, -1]))
+        if shadow_threshold > 0 and np.percentile(border, 95) <= shadow_threshold:
+            _, shadow_mask = cv2.threshold(gray, shadow_threshold, 255, cv2.THRESH_BINARY)
+            masks.append(shadow_mask)
+
     return masks
 
 
 def _quad_metrics(quad: np.ndarray, img_area: float) -> dict[str, float]:
     """计算候选四边形的几何指标。"""
     area = _polygon_area(quad)
-    hull = cv2.convexHull(quad.astype(np.int32))
-    hull_area = _polygon_area(hull.reshape(-1, 2).astype(np.float64)) or 1.0
+    hull = cv2.convexHull(quad)
+    hull_area = _polygon_area(hull.reshape(-1, 2)) or 1.0
 
     cos_sum = 0.0
     for i in range(4):
@@ -191,6 +204,33 @@ def _contours_to_quads(mask: np.ndarray, kernel: np.ndarray) -> list[np.ndarray]
     return quads
 
 
+def _edge_quads(edges: np.ndarray, kernel: np.ndarray) -> list[np.ndarray]:
+    """沿闭合边界找四角，保留被桌面、屏幕等外轮廓包围的纸页。"""
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+    contours, _ = cv2.findContours(closed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    candidates = []
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if not _MIN_AREA_RATIO * edges.size <= area <= 0.985 * edges.size:
+            continue
+        hull = cv2.convexHull(contour)
+        polygon = cv2.approxPolyDP(hull, 0.02 * cv2.arcLength(hull, True), True)
+        if len(polygon) == 4:
+            candidates.append(polygon.reshape(4, 2))
+    return candidates
+
+
+def _edge_support(quad: np.ndarray, distance: np.ndarray, tolerance: float) -> float:
+    """统计每条候选边附近实际有图像边缘的比例，再对四边取平均。"""
+    fractions = np.linspace(0.05, 0.95, 64, dtype=np.float32)
+    ends = np.roll(quad, -1, axis=0)
+    samples = quad[:, None, :] + (ends - quad)[:, None, :] * fractions[None, :, None]
+    pixels = np.rint(samples).astype(int)
+    x, y = pixels[..., 0], pixels[..., 1]
+    h, w = distance.shape
+    return float(np.mean(distance[y.clip(0, h - 1), x.clip(0, w - 1)] <= tolerance))
+
+
 def detect_quad(
     img: Image,
     *,
@@ -234,15 +274,40 @@ def detect_quad(
 
     best_quad: np.ndarray | None = None
     best_score = -1.0
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    smoothed = cv2.GaussianBlur(gray, (3, 3), 0)
+    edges = cv2.Canny(smoothed, 30, 90)
+    candidates = _edge_quads(edges, kernel)
+    # 纸面与桌面灰度相近时，用饱和度变化补齐灰度边缘的断点。
+    saturation = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)[:, :, 1]
+    color_edges = cv2.Canny(cv2.GaussianBlur(saturation, (3, 3), 0), 20, 60)
+    if np.any(color_edges):
+        combined_edges = cv2.bitwise_or(edges, color_edges)
+        candidates.extend(_edge_quads(combined_edges, kernel))
+    distance = cv2.distanceTransform(cv2.bitwise_not(edges), cv2.DIST_L2, 3)
     for mask in _paper_masks(small):
-        for cand in _contours_to_quads(mask, kernel):
-            cand = order_points(cand)
-            score = score_quad(cand, img_area)
-            # 四点全部贴边 = 检测到的其实是整幅画面，多半没找到纸面，压低置信度
+        candidates.extend(_contours_to_quads(mask, kernel))
+
+    def consider(quads: list[np.ndarray], edge_distance: np.ndarray) -> None:
+        nonlocal best_quad, best_score
+        for candidate in quads:
+            cand = order_points(candidate)
+            support = _edge_support(cand, edge_distance, k / 2)
+            score = score_quad(cand, img_area) * (0.6 + 0.4 * support)
             if _touches_border(cand, sw, sh):
                 score *= 0.75
             if score > best_score:
                 best_score, best_quad = score, cand
+
+    consider(candidates, distance)
+    if best_score < min_confidence:
+        # 同色浅背景可能只留下很弱的纸边。使用小核闭合，减少弱纹理互相粘连。
+        weak_edges = cv2.Canny(smoothed, 8, 24)
+        fine_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        weak_candidates = _edge_quads(weak_edges, fine_kernel)
+        if weak_candidates:
+            weak_distance = cv2.distanceTransform(cv2.bitwise_not(weak_edges), cv2.DIST_L2, 3)
+            consider(weak_candidates, weak_distance)
 
     if best_quad is None or best_score < min_confidence:
         return full_image_quad(img.shape, confidence=max(best_score, 0.0))
@@ -271,8 +336,8 @@ def warp_perspective(
 ) -> Image:
     """按四点做射影变换，得到正视的矩形页面。
 
-    输出尺寸由四边形的对边长度决定（取较长者，避免拉伸），可再用
-    ``aspect_prior`` 吸附到先验长宽比（A4 = √2，横放取倒数）。
+    输出尺寸由四边形的对边长度决定（取较长者估算），可再用
+    ``aspect_prior`` 吸附到先验长宽比（宽/高：竖放 A4 为 1/√2，横放为 √2）。
 
     Args:
         img: BGR 图像。
@@ -324,9 +389,9 @@ def warp_perspective(
 
 
 def auto_orient(img: Image, *, aspect_prior: float = _A4_ASPECT) -> Image:
-    """按 A4 先验把横向页面转正（竖放）。
+    """按图像宽高判断是否旋转为竖向。
 
-    仅在长宽比明确偏横向（> 1.15·√2 的倒数关系）时旋转 90°，避免误转。
+    宽度超过高度的 1.15 倍时顺时针旋转 90°。当前判断不使用 aspect_prior。
     """
     h, w = img.shape[:2]
     if w > h * 1.15:
