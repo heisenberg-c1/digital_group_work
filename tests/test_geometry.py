@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 
+import cv2
 import numpy as np
 import pytest
 
@@ -28,18 +29,35 @@ class TestOrderPoints:
         np.testing.assert_allclose(got[2], [300, 400])
         np.testing.assert_allclose(got[3], [10, 400])
 
-    def test_rotated_rect_keeps_cyclic_order(self):
-        """30° 旋转的矩形：排序结果仍为环序且起点是最上方的角。"""
-        theta = np.deg2rad(30)
+    @pytest.mark.parametrize("degrees", [-30, 30])
+    def test_rotated_rect_keeps_cyclic_order(self, degrees):
+        """正反倾斜时，打乱的纸张四角应恢复原来的左上起点和环序。"""
+        theta = np.deg2rad(degrees)
         rot = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
         rect = np.array([[0, 0], [400, 0], [400, 600], [0, 600]], dtype=np.float64) - 200
         pts = (rect @ rot.T) + 200
-        got = geometry.order_points(pts.astype(np.float32))
-        ys = got[:, 1]
-        assert ys[0] == ys.min()  # 起点是最高点
-        # 环序：相邻边交替横/竖
-        d = np.diff(np.vstack([got, got[:1]]), axis=0)
-        assert (np.linalg.norm(d, axis=1) > 100).all()
+        got = geometry.order_points(pts[[2, 0, 3, 1]])
+        np.testing.assert_allclose(got, pts, atol=1e-4)
+
+
+def test_edge_candidates_include_page_inside_another_outline():
+    edges = np.zeros((400, 500), dtype=np.uint8)
+    cv2.rectangle(edges, (5, 5), (490, 390), 255, 1)
+    cv2.rectangle(edges, (85, 50), (350, 340), 255, 1)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    page = np.float32([[85, 50], [350, 50], [350, 340], [85, 340]])
+    candidates = geometry._edge_quads(edges, kernel)
+    assert any(polygon_iou(geometry.order_points(q), page) > 0.98 for q in candidates)
+
+
+def test_edge_support_rewards_observed_page_sides():
+    # 已知的矩形纸边；平移 10 像素后，只有两条水平边仍能大部分重合。
+    edges = np.zeros((200, 200), dtype=np.uint8)
+    cv2.rectangle(edges, (40, 35), (150, 165), 255, 1)
+    distance = cv2.distanceTransform(cv2.bitwise_not(edges), cv2.DIST_L2, 3)
+    page = np.float32([[40, 35], [150, 35], [150, 165], [40, 165]])
+    assert geometry._edge_support(page, distance, 2) == 1
+    assert geometry._edge_support(page + [10, 0], distance, 2) < 0.55
 
 
 class TestDetectQuad:
@@ -50,6 +68,42 @@ class TestDetectQuad:
         assert quad.confidence >= 0.6
         iou = polygon_iou(quad.points, gt)
         assert iou > 0.95, f"IoU={iou:.3f}"
+
+    def test_smooth_side_light_without_page_edges_keeps_full_frame(self):
+        ramp = np.linspace(70, 220, 800, dtype=np.uint8)
+        image = np.broadcast_to(ramp[None, :, None], (600, 800, 3)).copy()
+        assert geometry.detect_quad(image).is_fallback
+
+    def test_detects_full_page_under_shadow(self):
+        img = np.full((600, 800, 3), 60, dtype=np.uint8)
+        img[60:540, 180:620] = 235
+        img[60:540, 180:400] = 90
+        corners = np.array([[180, 60], [619, 60], [619, 539], [180, 539]], dtype=np.float32)
+        detected = geometry.detect_quad(img)
+        assert detected.source == "auto"
+        assert polygon_iou(detected.points, corners) > 0.95
+
+    def test_oblique_page_with_similar_gray_background(self):
+        # 下半页与彩色桌面灰度几乎相同，只有颜色差异能补全这段纸边。
+        img = np.full((560, 780, 3), (60, 120, 150), dtype=np.uint8)
+        corners = np.int32([[155, 85], [590, 140], [690, 460], [85, 490]])
+        page = np.zeros(img.shape[:2], dtype=np.uint8)
+        cv2.fillConvexPoly(page, corners, 255)
+        img[page > 0] = 122
+        img[:320][page[:320] > 0] = 160
+        detected = geometry.detect_quad(img)
+        assert detected.source == "auto"
+        assert polygon_iou(detected.points, corners) > 0.95
+
+    def test_low_contrast_page_with_dark_and_bright_background_details(self):
+        img = np.full((500, 650, 3), 180, dtype=np.uint8)
+        corners = np.int32([[90, 150], [370, 45], [555, 320], [240, 450]])
+        cv2.fillConvexPoly(img, corners, (188, 188, 188))
+        cv2.circle(img, (35, 30), 30, (20, 20, 20), -1)
+        cv2.circle(img, (612, 450), 30, (250, 250, 250), -1)
+        detected = geometry.detect_quad(img)
+        assert detected.source == "auto"
+        assert polygon_iou(detected.points, corners) > 0.98
 
     def test_detects_straight_page(self, synthetic_page):
         img = paste_on_background(
