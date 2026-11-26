@@ -97,3 +97,35 @@ class TestRetinex:
         img = np.full((32, 32), 0.5, np.float32)
         with pytest.raises(ValueError):
             illumination.retinex(img, weights=(1.0, 1.0))
+
+
+
+def test_color_patch_keeps_chroma_and_paper_becomes_uniform():
+    from docscan.core import colorspace
+
+    page = np.full((240, 320, 3), 0.85, np.float32)
+    page[60:180, 90:230] = (0.12, 0.5, 0.8)
+    shaded = page * _gradient_light(page.shape[:2])[..., None]
+    out = illumination.remove_shading(shaded)
+    _, cb0, cr0 = colorspace.bgr_to_ycbcr(shaded)
+    _, cb1, cr1 = colorspace.bgr_to_ycbcr(out)
+    np.testing.assert_allclose(cb1, cb0, atol=1e-4)
+    np.testing.assert_allclose(cr1, cr0, atol=1e-4)
+    assert out[20, :, 0].std() < shaded[20, :, 0].std() / 5
+    assert np.isfinite(out).all()
+    assert out.min() >= 0 and out.max() <= 1
+
+
+def test_full_color_page_without_paper_reference_is_preserved():
+    img = np.full((80, 100, 3), (0.1, 0.4, 0.8), np.float32)
+    np.testing.assert_array_equal(illumination.remove_shading(img), img)
+
+
+
+@pytest.mark.parametrize("sigmas,weights", [
+    ((), ()), ((2,), (0,)), ((2,), (-1,)), ((2,), (np.nan,)),
+    ((0,), (1,)), ((np.inf,), (1,)),
+])
+def test_retinex_rejects_invalid_scales_and_weights(sigmas, weights):
+    with pytest.raises(ValueError):
+        illumination.retinex(np.ones((16, 16), np.float32), sigmas=sigmas, weights=weights)

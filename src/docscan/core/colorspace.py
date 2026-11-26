@@ -31,6 +31,8 @@ def _bgr_to_rgb(arr: Image) -> Image:
 
 def bgr_to_ycbcr(bgr: Image) -> tuple[Image, Image, Image]:
     """BGR float32[0,1] → (Y, Cb, Cr)，均为 float64、0..255 尺度。"""
+    if bgr.ndim != 3 or bgr.shape[2] != 3:
+        raise ValueError("bgr_to_ycbcr 需要三通道 BGR 图像")
     rgb = _bgr_to_rgb(to_float(bgr)).reshape(-1, 3).astype(np.float64) * 255.0
     ycc = rgb @ _M_RGB2YCC.T + _OFFSET
     target_shape = (*bgr.shape[:2], 3) if bgr.ndim == 3 else bgr.shape
@@ -84,7 +86,7 @@ def bgr_to_hsv(bgr: Image) -> tuple[Image, Image, Image]:
         （与 ``bgr_to_ycbcr`` 的 0..255 尺度保持一致，便于共用 ``apply_on_*``）。
     """
     arr = to_float(bgr)
-    if arr.ndim != 3:
+    if arr.ndim != 3 or arr.shape[2] != 3:
         raise ValueError("bgr_to_hsv 需要三通道 BGR 图像")
     rgb = arr[..., ::-1].astype(np.float64)
     r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]

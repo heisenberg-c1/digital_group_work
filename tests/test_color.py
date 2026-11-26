@@ -135,3 +135,12 @@ class TestWhitePatch:
         out = color.white_patch(img)
         highs = [float(out[..., c].max()) for c in range(3)]
         assert max(highs) - min(highs) < 0.15
+
+
+def test_conversions_reject_non_bgr_shapes():
+    import pytest
+
+    for shape in [(2, 3), (2, 4), (2, 3, 1), (2, 3, 4)]:
+        for convert in (colorspace.bgr_to_ycbcr, colorspace.bgr_to_hsv):
+            with pytest.raises(ValueError, match="三通道"):
+                convert(np.zeros(shape, dtype=np.uint8))

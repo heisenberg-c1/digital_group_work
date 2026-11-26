@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
+from scipy.ndimage import distance_transform_edt
 
+from docscan.core import colorspace
 from docscan.core.types import Image, to_float, to_uint8
 
 
@@ -33,13 +35,19 @@ def _odd_kernel(sigma: float) -> int:
     return int(2 * round(max(sigma, 1.0)) + 1) | 1
 
 
-def estimate_background(img: Image, *, sigma: float = 30.0) -> Image:
+def estimate_background(
+    img: Image, *, sigma: float = 30.0, exclude_mask: np.ndarray | None = None
+) -> Image:
     """估计光照场（低频亮度分布），输出与输入同形状的 float32[0,1]。
 
     步骤：每通道先做大核闭运算（把暗色笔画填成纸面亮度），
     再做大核高斯平滑（消除闭运算留下的块状痕迹）。
     """
     arr = to_float(img)
+    if exclude_mask is not None:
+        # 用最近的纸面亮度填充彩色区域，再估计平滑光照场。
+        indices = distance_transform_edt(exclude_mask, return_distances=False, return_indices=True)
+        arr = arr[tuple(indices)]
     k = _odd_kernel(sigma)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
     ks = _odd_kernel(sigma / 2.0)
@@ -55,7 +63,7 @@ def estimate_background(img: Image, *, sigma: float = 30.0) -> Image:
 def remove_shading(
     img: Image, *, sigma: float = 30.0, percentile: float = 97.0, strength: float = 1.0
 ) -> Image:
-    """背景估计相除去阴影。
+    """背景估计相除去阴影，彩色输入仅校正 Y 并保护色度。
 
     公式::
 
@@ -74,11 +82,27 @@ def remove_shading(
         float32[0,1] 图像（uint8 输入也返回 float，便于与后续模块衔接）。
     """
     arr = to_float(img)
-    bg = estimate_background(arr, sigma=sigma)
-    ratio = arr / np.maximum(bg, 1e-4)
+    if arr.ndim == 3:
+        y, cb, cr = colorspace.bgr_to_ycbcr(arr)
+        _, saturation, _ = colorspace.bgr_to_hsv(arr)
+        excluded = saturation > 0.15
+        if excluded.all():
+            # 全幅彩色且没有纸面参照时，无法可靠推断纸面光照。
+            return arr.copy()
+        plane = (y / 255.0).astype(np.float32)
+        bg = estimate_background(plane, sigma=sigma, exclude_mask=excluded)
+    else:
+        plane = arr
+        bg = estimate_background(plane, sigma=sigma)
+    ratio = plane / np.maximum(bg, 1e-4)
     ref = max(float(np.percentile(ratio, percentile)), 1e-4)
     corrected = np.clip(ratio / ref, 0.0, 1.0)
-    return np.clip(arr * (1 - strength) + corrected * strength, 0.0, 1.0)
+    output = plane * (1 - strength) + corrected * strength
+    if arr.ndim == 3:
+        # 固定 Cb/Cr 时，Y 的改变量等量加到 B/G/R。限制改变量可避免裁剪偏色。
+        delta = np.clip(output - plane, -arr.min(axis=2), 1.0 - arr.max(axis=2))
+        return colorspace.ycbcr_to_bgr((plane + delta) * 255.0, cb, cr)
+    return np.clip(output, 0.0, 1.0)
 
 
 def retinex(
@@ -107,6 +131,16 @@ def retinex(
         weights = tuple([1.0] * len(sigmas))
     if len(weights) != len(sigmas):
         raise ValueError("sigmas 与 weights 长度不一致")
+
+    if not sigmas or not np.isfinite(sigmas).all() or np.any(np.asarray(sigmas) <= 0):
+        raise ValueError("sigmas 必须非空且全部为有限正数")
+    if (
+        not np.isfinite(weights).all()
+        or np.any(np.asarray(weights) < 0)
+        or not np.isfinite(sum(weights))
+        or sum(weights) <= 0
+    ):
+        raise ValueError("weights 必须为有限非负数且总和为有限正数")
 
     eps = 1.0 / 255.0
     log_i = np.log(arr + eps)
