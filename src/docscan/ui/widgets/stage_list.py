@@ -133,12 +133,12 @@ class StageList(ttk.Frame):
 
         for r, spec in enumerate(stage.params_spec):
             ttk.Label(grid, text=spec.label, style="PanelDim.TLabel", anchor="w").grid(
-                row=r, column=0, sticky="w", pady=(2, 2), columnspan=2
+                row=2 * r, column=0, sticky="w", pady=(2, 2), columnspan=2
             )
             if isinstance(spec, NumParam):
-                self._build_num_control(grid, r, stage, spec)
+                self._build_num_control(grid, 2 * r + 1, stage, spec)
             elif isinstance(spec, EnumParam):
-                self._build_enum_control(grid, r, stage, spec)
+                self._build_enum_control(grid, 2 * r + 1, stage, spec)
 
     def _build_num_control(
         self, parent: ttk.Frame, row: int, stage: Stage, spec: NumParam
@@ -198,7 +198,8 @@ class StageList(ttk.Frame):
         box.set(spec.label_of(value))
 
         def on_pick(_e=None) -> None:
-            chosen = dict(spec.choices).get(box.get(), spec.default)
+            values_by_label = {label: value for value, label in spec.choices}
+            chosen = values_by_label.get(box.get(), spec.default)
             stage.params[spec.key] = chosen
             if self._on_param_change:
                 self._on_param_change(stage.name, spec.key, chosen)
